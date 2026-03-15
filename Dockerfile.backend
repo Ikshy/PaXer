@@ -1,0 +1,73 @@
+# Dockerfile.backend
+# ==================
+# Multi-stage production image for the CTHMP FastAPI backend.
+#
+# Stage 1: builder — installs Python deps into a venv
+# Stage 2: runtime — copies only the venv + source; no build tools
+#
+# Usage:
+#   docker build -f Dockerfile.backend -t cthmp-backend:latest .
+#   docker run --env-file .env -p 8000:8000 cthmp-backend:latest
+
+# ── Stage 1: builder ──────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
+
+# System deps needed to build some wheels (e.g. asyncpg, opencv)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy only dependency metadata first for better layer caching
+COPY pyproject.toml ./
+
+# Create venv and install deps (no dev extras in prod)
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -e "."
+
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+# Minimal runtime system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user for security
+RUN useradd --create-home --shell /bin/bash cthmp
+WORKDIR /app
+
+# Copy venv from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy application source
+COPY backend/ ./backend/
+COPY ml/ ./ml/
+COPY data/ ./data/
+
+# Create runtime directories
+RUN mkdir -p data/store ml/artifacts \
+    && chown -R cthmp:cthmp /app
+
+USER cthmp
+
+# Health check — polls /health every 30s
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+
+EXPOSE 8000
+
+# Uvicorn with 2 workers; override via CMD in compose if needed
+CMD ["uvicorn", "backend.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "2", \
+     "--log-level", "info"]
