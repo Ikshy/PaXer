@@ -1,0 +1,174 @@
+version: "3.9"
+
+# =========================================================================
+# CTHMP — Full local development stack
+#
+# Services:
+#   postgres   — metadata database
+#   minio      — object store for imagery (S3-compatible)
+#   backend    — FastAPI application
+#   frontend   — React/Vite dev server (hot-reload)
+#   synth      — one-shot synthetic data generator (exits after running)
+#
+# Usage:
+#   cp .env.example .env          # fill in values
+#   docker compose up --build     # start everything
+#   docker compose up backend     # backend only
+#   docker compose run synth      # regenerate synthetic samples
+#
+# Ports exposed on host:
+#   5432  -> postgres
+#   9000  -> minio API
+#   9001  -> minio console  (http://localhost:9001)
+#   8000  -> backend API    (http://localhost:8000/docs)
+#   5173  -> frontend dev   (http://localhost:5173)
+# =========================================================================
+
+services:
+
+  # postgres
+  postgres:
+    image: postgres:16-alpine
+    container_name: cthmp_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-cthmp}
+      POSTGRES_USER:     ${POSTGRES_USER:-cthmp_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cthmp_user} -d ${POSTGRES_DB:-cthmp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # minio
+  minio:
+    image: minio/minio:latest
+    container_name: cthmp_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-changeme}
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: cthmp-dev:latest
+    container_name: cthmp_backend
+    restart: unless-stopped
+    command: >
+      uvicorn backend.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --log-level info
+    volumes:
+      - .:/app
+      - ./data/samples:/app/data/samples
+      - ./ml/artifacts:/app/ml/artifacts
+      - ./data/store:/app/data/store
+    environment:
+      APP_ENV:           development
+      SECRET_KEY:        ${SECRET_KEY:-dev-secret-change-me}
+      POSTGRES_HOST:     postgres
+      POSTGRES_PORT:     5432
+      POSTGRES_DB:       ${POSTGRES_DB:-cthmp}
+      POSTGRES_USER:     ${POSTGRES_USER:-cthmp_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      MINIO_ENDPOINT:    minio:9000
+      MINIO_ACCESS_KEY:  ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY:  ${MINIO_SECRET_KEY:-changeme}
+      MINIO_BUCKET:      ${MINIO_BUCKET:-cthmp-imagery}
+      MODEL_CHECKPOINT:  ml/artifacts/best_model.pt
+      LOCAL_STORE_DIR:   data/store
+      SYNTH_OUTPUT_DIR:  data
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 20s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  # frontend Vite dev server
+  frontend:
+    image: node:20-alpine
+    container_name: cthmp_frontend
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    volumes:
+      - ./frontend:/app
+      - frontend_nm:/app/node_modules
+    environment:
+      VITE_API_BASE: ""
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+  # synthetic data generator (one-shot, tools profile)
+  synth:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: cthmp-dev:latest
+    container_name: cthmp_synth
+    command: python data/synthetic_generator.py --num-images 20 --seed 42
+    volumes:
+      - .:/app
+      - ./data/samples:/app/data/samples
+    environment:
+      SYNTH_SEED:        42
+      SYNTH_NUM_IMAGES:  20
+      SYNTH_OUTPUT_DIR:  data/samples
+    profiles:
+      - tools
+
+  # test runner (one-shot, tools profile)
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: cthmp-dev:latest
+    container_name: cthmp_test
+    command: >
+      sh -c "TESTING=1 pytest tests/ -v --tb=short
+      --cov=data --cov=ml --cov=backend --cov-report=term-missing"
+    volumes:
+      - .:/app
+      - ./data/samples:/app/data/samples
+    environment:
+      TESTING:          "1"
+      LOCAL_STORE_DIR:  /tmp/cthmp_test_store
+      SYNTH_OUTPUT_DIR: data
+    profiles:
+      - tools
+
+volumes:
+  pgdata:
+  miniodata:
+  frontend_nm:
