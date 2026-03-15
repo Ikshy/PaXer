@@ -1,0 +1,32 @@
+# Dockerfile.dev
+# ==============
+# Development container for CTHMP.
+# Used by docker-compose.yml for the backend, synth, and test services.
+# Source is mounted as a volume — no COPY needed; changes are instant.
+#
+# NOT for production — use Dockerfile.backend instead.
+
+FROM python:3.11-slim
+
+# System deps: OpenCV headless + asyncpg build deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy only metadata first for layer caching
+COPY pyproject.toml ./
+
+# Install all deps including dev extras
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -e ".[dev]"
+
+# Source is volume-mounted at runtime, not copied here
+# This keeps rebuilds fast — only pyproject.toml changes trigger a layer rebuild
+
+# Default command: run tests (override in docker-compose)
+CMD ["pytest", "tests/", "-v", "--tb=short"]
