@@ -1,0 +1,47 @@
+version: "3.9"
+
+# =========================================================================
+# CTHMP — Production overrides
+#
+# Usage (from repo root):
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Differences from dev:
+#   - Backend uses Dockerfile.backend (multi-stage, non-root, no hot-reload)
+#   - Frontend uses Dockerfile.frontend (Nginx, serves pre-built dist)
+#   - No source-code volume mounts
+#   - Uvicorn workers increased
+#   - Restart policy: always
+# =========================================================================
+
+services:
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: cthmp-backend:latest
+    command:
+      - uvicorn
+      - backend.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --workers
+      - "4"
+      - --log-level
+      - warning
+    volumes: []       # no source mount in prod
+    restart: always
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    image: cthmp-frontend:latest
+    command: ["nginx", "-g", "daemon off;"]
+    volumes: []
+    ports:
+      - "8080:8080"
+    restart: always
